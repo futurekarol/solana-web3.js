@@ -922,6 +922,7 @@ export type SimulatedTransactionResponse = {
   unitsConsumed?: number;
   returnData?: TransactionReturnData | null;
 };
+
 const SimulatedTransactionResponseStruct = jsonRpcResultAndContext(
   pick({
     err: nullable(union([pick({}), string()])),
@@ -949,6 +950,116 @@ const SimulatedTransactionResponseStruct = jsonRpcResultAndContext(
           data: tuple([string(), literal('base64')]),
         }),
       ),
+    ),
+  }),
+);
+
+export type Slot = number;
+
+/**
+ * Simulate on top of bank with the provided commitment or on the provided slot's bank or on top of the RPC's highest slot's bank i.e. the working bank.
+ */
+export type SimulationSlotConfig = Commitment | Slot | 'tip';
+
+export type SimulateBundleConfig = {
+  /** list of accounts to return the pre transaction execution state for. The length of the array must be equal to the number transactions in the bundle */
+  preExecutionAccountsConfigs: ({
+    encoding: 'base64';
+    addresses: string[];
+  } | null)[];
+  /** list of accounts to return the pre transaction execution state for. The length of the array must be equal to the number transactions in the bundle */
+  postExecutionAccountsConfigs: ({
+    encoding: 'base64';
+    addresses: string[];
+  } | null)[];
+  /** Optional parameter to specifuy the bank to run simulation against */
+  simulationBank?: SimulationSlotConfig;
+  /** Optional parameter used to enable signature verification before simulation */
+  skipSigVerify?: boolean;
+  /** Optional parameter used to replace the simulated transaction's recent blockhash with the latest blockhash */
+  replaceRecentBlockhash?: boolean;
+};
+
+export type SimulatedBundleTransactionResult = {
+  err: TransactionError | string | null;
+  logs: Array<string> | null;
+  preExecutionAccounts?: SimulatedTransactionAccountInfo[] | null;
+  postExecutionAccounts?: SimulatedTransactionAccountInfo[] | null;
+  unitsConsumed?: number;
+  returnData?: TransactionReturnData | null;
+};
+
+export type BundleError = {} | string;
+
+export type BundleSimulationSummary =
+  | {
+      succeeded: null;
+    }
+  | {
+      failed: {
+        error: BundleError;
+        txSignature: string;
+      };
+    };
+
+export type SimulatedBundleResponse = {
+  summary: BundleSimulationSummary;
+  transactionResults: SimulatedBundleTransactionResult[];
+};
+
+const SimulatedBundleResponseStruct = jsonRpcResultAndContext(
+  pick({
+    summary: union([
+      pick({
+        failed: pick({
+          error: union([pick({}), string()]),
+          txSignature: string(),
+        }),
+      }),
+      pick({
+        succeeded: literal(null),
+      }),
+    ]),
+    transactionResults: array(
+      pick({
+        err: nullable(union([pick({}), string()])),
+        logs: nullable(array(string())),
+        preExecutionAccounts: optional(
+          nullable(
+            array(
+              pick({
+                executable: boolean(),
+                owner: string(),
+                lamports: number(),
+                data: array(string()),
+                rentEpoch: optional(number()),
+              }),
+            ),
+          ),
+        ),
+        postExecutionAccounts: optional(
+          nullable(
+            array(
+              pick({
+                executable: boolean(),
+                owner: string(),
+                lamports: number(),
+                data: array(string()),
+                rentEpoch: optional(number()),
+              }),
+            ),
+          ),
+        ),
+        unitsConsumed: optional(number()),
+        returnData: optional(
+          nullable(
+            pick({
+              programId: string(),
+              data: tuple([string(), literal('base64')]),
+            }),
+          ),
+        ),
+      }),
     ),
   }),
 );
@@ -5654,6 +5765,51 @@ export class Connection {
     const args = [encodedTransaction, config];
     const unsafeRes = await this._rpcRequest('simulateTransaction', args);
     const res = create(unsafeRes, SimulatedTransactionResponseStruct);
+    if ('error' in res) {
+      let logs;
+      if ('data' in res.error) {
+        logs = res.error.data.logs;
+        if (logs && Array.isArray(logs)) {
+          const traceIndent = '\n    ';
+          const logTrace = traceIndent + logs.join(traceIndent);
+          console.error(res.error.message, logTrace);
+        }
+      }
+      throw new SendTransactionError(
+        'failed to simulate transaction: ' + res.error.message,
+        logs,
+      );
+    }
+    return res.result;
+  }
+
+  /**
+   * Simulate a transaction
+   */
+  async simulateBundle(
+    bundle: VersionedTransaction[],
+    config?: SimulateBundleConfig,
+  ): Promise<RpcResponseAndContext<SimulatedBundleResponse>> {
+    if (
+      config &&
+      bundle.length !== config.preExecutionAccountsConfigs.length &&
+      bundle.length !== config.postExecutionAccountsConfigs.length
+    ) {
+      throw new Error(
+        'pre/post execution account config length must match bundle length',
+      );
+    }
+
+    const encodedTransactions = bundle.map(versionedTx => {
+      return Buffer.from(versionedTx.serialize()).toString('base64');
+    });
+
+    const simulationConfig: any = config || {};
+    simulationConfig.transactionEncoding = 'base64';
+    const args = [encodedTransactions, simulationConfig];
+    const unsafeRes = await this._rpcRequest('simulateBundle', args);
+    const res = create(unsafeRes, SimulatedBundleResponseStruct);
+
     if ('error' in res) {
       let logs;
       if ('data' in res.error) {
